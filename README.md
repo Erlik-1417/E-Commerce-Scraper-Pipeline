@@ -3,6 +3,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Database](https://img.shields.io/badge/Database-SQLite3-003B57.svg?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Scraping](https://img.shields.io/badge/Library-BeautifulSoup4%20%7C%20Requests-green.svg)](https://pypi.org/project/beautifulsoup4/)
+[![Tests](https://img.shields.io/badge/Tests-Pytest-yellowgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
+[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF.svg?logo=githubactions&logoColor=white)](https://github.com/Erlik-1417/E-Commerce-Scraper-Pipeline/actions)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An end-to-end automated ETL (Extract, Transform, Load) data pipeline developed for e-commerce catalog monitoring and analytics. Built to showcase core software engineering best practices for an e-commerce intelligence platform, emphasizing **automated data extraction**, **data cleaning**, and **ensuring data integrity via SQL**.
@@ -22,6 +24,7 @@ This project implements an automated pipeline that targets e-commerce category f
 - **Deep Data Enrichment**: Crawls individual product detail pages to extract high-value e-commerce metrics (**UPC / SKU**, **exact stock numbers**, **star ratings**, and **direct product URLs**).
 - **HTTP Connection Pooling**: Employs `requests.Session` with HTTP Keep-Alive for high-throughput network operations.
 - **Multi-Tier Data Integrity & Migration**: Enforces strict validation at runtime and within the database schema using SQL `CHECK` constraints, foreign keys, and safe schema migration.
+- **Automated CI/CD & Testing**: Fully automated GitHub Actions workflow running unit tests (`pytest`), scheduled daily crawls, and publishing database artifacts.
 
 ---
 
@@ -91,6 +94,11 @@ Going beyond basic catalog cards, the pipeline performs deep inspection on produ
 - **Automated Schema Migration**: On initialization, inspects existing tables via SQLite `PRAGMA table_info` and safely performs non-destructive schema migrations (`ALTER TABLE`) if new tables or columns are introduced.
 - **SQL Injection Prevention**: Employs parameterized queries (`?`, `?`, `?`, ...) via Python's standard `sqlite3` module.
 
+### 6. Automated CI/CD & Testing
+- **Continuous Integration**: GitHub Actions workflow (`.github/workflows/scraper_ci.yml`) automatically triggers on push and pull request to run the full Pytest suite.
+- **Scheduled Cron Crawl**: Automatically executes daily at `06:00 UTC` to monitor product catalog changes in the cloud.
+- **Artifact Publishing**: Packages and uploads the resulting `mindsite_mock_data.db` as a downloadable artifact after each automated run.
+
 ---
 
 ## 🗄️ Database Schema
@@ -132,6 +140,8 @@ The pipeline provisions a local SQLite database named `mindsite_mock_data.db` wi
 - **HTTP Client**: [`requests`](https://requests.readthedocs.io/) (Session Connection Pooling)
 - **HTML Parser**: [`beautifulsoup4`](https://www.crummy.com/software/BeautifulSoup/)
 - **Database Engine**: [`sqlite3`](https://docs.python.org/3/library/sqlite3.html) (Relational with Foreign Keys)
+- **Testing Framework**: [`pytest`](https://pytest.org/)
+- **Automation / DevOps**: GitHub Actions CI/CD (Cron, Tests, Artifacts)
 - **URL Handling**: `urllib.parse`
 - **CLI Parsing**: `argparse`
 
@@ -142,8 +152,12 @@ The pipeline provisions a local SQLite database named `mindsite_mock_data.db` wi
 ```text
 E-Commerce-Scraper-Pipeline/
 │
+├── .github/
+│   └── workflows/
+│       └── scraper_ci.yml     # Automated CI/CD pipeline (Cron & Pytest)
 ├── scraper.py                 # Core scraping, transformation, upsert & price tracking pipeline
-├── requirements.txt           # Project dependencies (requests, beautifulsoup4)
+├── test_scraper.py            # Complete Pytest test suite with isolated fixtures
+├── requirements.txt           # Project dependencies (requests, beautifulsoup4, pytest)
 ├── .gitignore                 # Standard Python/IDE/DB ignore rules
 └── README.md                  # Comprehensive portfolio documentation
 ```
@@ -178,7 +192,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 5. Execute the Pipeline
+### 5. Run the Test Suite
+Execute all unit and integration tests:
+```bash
+pytest -v
+```
+
+### 6. Execute the Pipeline
 Run the default scraper (Science category, full deep enrichment, upsert enabled):
 ```bash
 python scraper.py
@@ -196,7 +216,7 @@ python scraper.py --url "http://books.toscrape.com/catalogue/category/books/trav
 python scraper.py --no-deep-scrape
 ```
 
-### 6. Terminal Output Example
+### 7. Terminal Output Example
 ```text
 ====================================================================
   E-COMMERCE DATA EXTRACTION & INGESTION PIPELINE (v2.0)
@@ -218,7 +238,7 @@ Successfully processed and synced 14 products.
 ====================================================================
 ```
 
-### 7. Inspecting Price History & Products
+### 8. Inspecting Price History & Products
 Query price changes and current stock directly:
 ```bash
 python -c "import sqlite3; conn = sqlite3.connect('mindsite_mock_data.db'); print('Price history entries:', conn.cursor().execute('SELECT product_id, upc, old_price, new_price, percentage_change, recorded_at FROM price_history LIMIT 3').fetchall())"
@@ -226,14 +246,14 @@ python -c "import sqlite3; conn = sqlite3.connect('mindsite_mock_data.db'); prin
 
 ---
 
-## 🔮 Scalability & Future Roadmap
+## 🔮 Roadmap & Milestones
 
 - [x] Automated Pagination Handling
 - [x] Deep Product Detail Enrichment (UPC, Stock Count, Star Rating, Canonical URL)
 - [x] Price History Tracking & Anomaly Alerts (Slowly Changing Dimensions)
 - [x] Zero-clutter, clean codebase
-- [ ] Automated Test Suite (`pytest` with mock fixtures)
-- [ ] Continuous Integration & Scheduled Crawl via GitHub Actions
+- [x] Automated Test Suite (`pytest` with mock fixtures)
+- [x] Continuous Integration & Scheduled Crawl via GitHub Actions
 
 ---
 

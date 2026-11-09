@@ -43,3 +43,7 @@ venv.bak/
 *.db
 *.sqlite
 *.sqlite3
+
+# Pytest cache
+.pytest_cache/
+*.pytest_cache

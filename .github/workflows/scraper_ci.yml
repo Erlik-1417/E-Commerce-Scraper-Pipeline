@@ -1,0 +1,48 @@
+name: E-Commerce Scraper CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Pytest Suite
+        run: |
+          pytest -v
+
+      - name: Execute Scraper Pipeline
+        run: |
+          python scraper.py --max-pages 1
+
+      - name: Verify SQLite Integrity
+        run: |
+          python -c "import sqlite3; conn = sqlite3.connect('mindsite_mock_data.db'); c = conn.cursor(); print('Products:', c.execute('SELECT COUNT(*) FROM products').fetchone()[0]); print('Price History:', c.execute('SELECT COUNT(*) FROM price_history').fetchone()[0])"
+
+      - name: Upload Database Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-database-artifact
+          path: mindsite_mock_data.db
+          retention-days: 7

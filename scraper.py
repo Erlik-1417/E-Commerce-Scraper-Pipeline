@@ -1,22 +1,3 @@
-"""
-E-Commerce Web Scraping and Data Processing Pipeline (v1.1)
-------------------------------------------------------------
-An automated ETL pipeline designed to extract product data from an e-commerce
-catalog, perform data cleaning and validation, and store structured records into
-a relational SQLite database with strict integrity checks.
-
-Features:
-- Automated Pagination Crawler: Navigates category pages seamlessly.
-- Deep Data Enrichment: Extracts UPC/SKU, Stock Count, Star Rating, and Product URLs.
-- Connection Pooling: Reuses HTTP sessions for high-performance extraction.
-- Data Integrity: Multi-tier validation (Python rules + SQLite CHECK constraints).
-- Safe Schema Migration: Automatically upgrades existing databases without data loss.
-
-Target Site: Books to Scrape (Science Category)
-Database: mindsite_mock_data.db
-Table: products
-"""
-
 import argparse
 import logging
 import re
@@ -28,7 +9,9 @@ from typing import Any, Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
 
-# Configure logging for structured feedback
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] %(message)s",
@@ -37,17 +20,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EcommerceScraper")
 
-# Default Configurations
 DEFAULT_URL = "http://books.toscrape.com/catalogue/category/books/science_22/index.html"
 DEFAULT_DB_PATH = "mindsite_mock_data.db"
-REQUEST_TIMEOUT = 15  # seconds
+REQUEST_TIMEOUT = 15
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Textual rating to numerical mapping
 RATING_MAP = {
     "one": 1,
     "two": 2,
@@ -58,35 +39,22 @@ RATING_MAP = {
 
 
 def get_http_session() -> requests.Session:
-    """
-    Creates and configures a requests.Session with HTTP Keep-Alive
-    and custom headers for optimal connection pooling and throughput.
-
-    Returns:
-        requests.Session: Configured session instance.
-    """
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
     return session
 
 
 def init_database(db_path: str = DEFAULT_DB_PATH) -> None:
-    """
-    Initializes the SQLite database and ensures the target table exists.
-    Performs automated schema migrations if previous versions exist.
-
-    Args:
-        db_path (str): Filepath to the SQLite database.
-    """
     logger.info(f"Initializing database at: {db_path}")
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        # Create table with complete schema if it doesn't exist
+        cursor.execute("PRAGMA foreign_keys = ON;")
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                upc TEXT,
+                upc TEXT UNIQUE,
                 title TEXT NOT NULL,
                 price REAL NOT NULL,
                 stock_count INTEGER,
@@ -100,11 +68,9 @@ def init_database(db_path: str = DEFAULT_DB_PATH) -> None:
             """
         )
 
-        # Check existing table columns to perform safe migration if needed
         cursor.execute("PRAGMA table_info(products);")
         existing_columns = {row[1] for row in cursor.fetchall()}
 
-        # Migration columns for enriched data
         enrichment_columns = [
             ("upc", "TEXT"),
             ("stock_count", "INTEGER"),
@@ -117,23 +83,41 @@ def init_database(db_path: str = DEFAULT_DB_PATH) -> None:
                 logger.info(f"Migrating schema: adding column '{col_name}' ({col_type})")
                 cursor.execute(f"ALTER TABLE products ADD COLUMN {col_name} {col_type};")
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                upc TEXT,
+                old_price REAL,
+                new_price REAL NOT NULL,
+                price_change REAL NOT NULL,
+                percentage_change REAL NOT NULL,
+                recorded_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_products_upc ON products(upc);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_history_pid ON price_history(product_id);")
+
+        cursor.execute(
+            """
+            DELETE FROM products
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM products
+                GROUP BY title
+            );
+            """
+        )
+
         conn.commit()
-    logger.info("Database schema verified (table 'products' is ready and up to date).")
+    logger.info("Database schema verified (products and price_history tables are ready).")
 
 
 def clean_price(raw_price: Optional[str]) -> Optional[float]:
-    """
-    Extracts numerical value from a raw price string, stripping currency symbols.
-
-    Example:
-        '£42.96' -> 42.96
-
-    Args:
-        raw_price (Optional[str]): Raw price text from HTML.
-
-    Returns:
-        Optional[float]: Cleaned numerical price, or None if parsing fails.
-    """
     if not raw_price:
         return None
     match = re.search(r"(\d+(?:\.\d+)?)", raw_price)
@@ -146,33 +130,12 @@ def clean_price(raw_price: Optional[str]) -> Optional[float]:
 
 
 def clean_text(raw_text: Optional[str]) -> str:
-    """
-    Strips excess whitespaces, tabs, and newlines from a string.
-
-    Args:
-        raw_text (Optional[str]): Text to sanitize.
-
-    Returns:
-        str: Cleaned string.
-    """
     if not raw_text:
         return ""
     return " ".join(raw_text.split())
 
 
 def parse_rating(element: Optional[BeautifulSoup]) -> Optional[int]:
-    """
-    Converts CSS star-rating classes into an integer score (1-5).
-
-    Example:
-        <p class="star-rating Four"> -> 4
-
-    Args:
-        element (Optional[BeautifulSoup]): Tag containing star-rating class.
-
-    Returns:
-        Optional[int]: Score from 1 to 5, or None if not found.
-    """
     if not element:
         return None
     classes = element.get("class", [])
@@ -187,17 +150,6 @@ def fetch_product_details(
     session: requests.Session,
     detail_url: str,
 ) -> Dict[str, Any]:
-    """
-    Performs deep scraping on a product's individual detail page to extract
-    extended e-commerce metrics: UPC/SKU, exact stock count, and description.
-
-    Args:
-        session (requests.Session): Active HTTP session.
-        detail_url (str): Absolute URL to the product detail page.
-
-    Returns:
-        Dict[str, Any]: Dictionary containing enriched fields.
-    """
     enriched: Dict[str, Any] = {
         "upc": None,
         "stock_count": None,
@@ -209,12 +161,10 @@ def fetch_product_details(
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # 1. Extract UPC from specification table
         upc_th = soup.find("th", string=re.compile(r"^UPC$", re.IGNORECASE))
         if upc_th and upc_th.find_next_sibling("td"):
             enriched["upc"] = clean_text(upc_th.find_next_sibling("td").get_text())
 
-        # 2. Extract Exact Available Stock Number from "In stock (X available)"
         avail_elem = soup.find("p", class_="instock availability")
         if avail_elem:
             avail_text = avail_elem.get_text()
@@ -222,7 +172,6 @@ def fetch_product_details(
             if stock_match:
                 enriched["stock_count"] = int(stock_match.group(1))
 
-        # 3. Extract Rating (fallback or validation)
         star_elem = soup.find("p", class_="star-rating")
         if star_elem:
             enriched["detail_rating"] = parse_rating(star_elem)
@@ -239,25 +188,11 @@ def parse_page_products(
     session: requests.Session,
     enable_deep_scrape: bool = True,
 ) -> List[Dict[str, Any]]:
-    """
-    Parses product cards on a catalog page and optionally triggers
-    deep scraping for each product.
-
-    Args:
-        soup (BeautifulSoup): Parsed HTML of current page.
-        current_url (str): URL of current page (for relative URL resolution).
-        session (requests.Session): HTTP session.
-        enable_deep_scrape (bool): Whether to fetch individual detail pages.
-
-    Returns:
-        List[Dict[str, Any]]: List of extracted and enriched product records.
-    """
     product_cards = soup.find_all("article", class_="product_pod")
     logger.info(f"Discovered {len(product_cards)} products on page: {current_url}")
 
     products = []
     for card in product_cards:
-        # Title extraction (prefers full title attribute)
         title_tag = card.find("h3")
         title = ""
         relative_url = ""
@@ -267,24 +202,19 @@ def parse_page_products(
             relative_url = anchor.get("href", "")
         title = clean_text(title)
 
-        # Price extraction
         price_tag = card.find("p", class_="price_color")
         price = clean_price(price_tag.get_text()) if price_tag else None
 
-        # Availability text
         avail_tag = card.find("p", class_="instock availability")
         availability = clean_text(avail_tag.get_text()) if avail_tag else ""
 
-        # Star Rating from card
         star_elem = card.find("p", class_="star-rating")
         rating = parse_rating(star_elem)
 
-        # Resolve Absolute Product URL
         product_url = (
             urllib.parse.urljoin(current_url, relative_url) if relative_url else None
         )
 
-        # Deep scraping: Enrich with UPC and exact Stock Count
         upc = None
         stock_count = None
         if enable_deep_scrape and product_url:
@@ -314,17 +244,6 @@ def crawl_catalog(
     max_pages: Optional[int] = None,
     enable_deep_scrape: bool = True,
 ) -> List[Dict[str, Any]]:
-    """
-    Crawls category pages with automatic pagination following 'next' links.
-
-    Args:
-        start_url (str): The initial category URL.
-        max_pages (Optional[int]): Maximum number of pages to traverse (None = all).
-        enable_deep_scrape (bool): Whether to perform deep scraping on detail pages.
-
-    Returns:
-        List[Dict[str, Any]]: Aggregated list of all extracted products.
-    """
     session = get_http_session()
     all_products: List[Dict[str, Any]] = []
     current_url: Optional[str] = start_url
@@ -344,7 +263,6 @@ def crawl_catalog(
             logger.error(f"Failed to fetch page {current_url}: {err}")
             break
 
-        # Parse current page products
         page_products = parse_page_products(
             soup=soup,
             current_url=current_url,
@@ -353,12 +271,10 @@ def crawl_catalog(
         )
         all_products.extend(page_products)
 
-        # Check maximum pages limit
         if max_pages and page_count >= max_pages:
             logger.info(f"Reached specified page limit ({max_pages}). Stopping crawl.")
             break
 
-        # Check for Pagination: Look for <li class="next"><a href="...">
         next_tag = soup.find("li", class_="next")
         if next_tag and next_tag.find("a"):
             next_href = next_tag.find("a").get("href")
@@ -375,20 +291,6 @@ def crawl_catalog(
 
 
 def validate_product(product: Dict[str, Any]) -> bool:
-    """
-    Applies business rules and validation to product data:
-    1. Title must not be empty.
-    2. Price must be a valid float and strictly greater than 0.
-    3. Availability must not be empty.
-    4. Rating (if present) must be between 1 and 5.
-    5. Stock count (if present) must be >= 0.
-
-    Args:
-        product (Dict[str, Any]): Product dictionary to evaluate.
-
-    Returns:
-        bool: True if valid, False otherwise.
-    """
     title = product.get("title")
     price = product.get("price")
     availability = product.get("availability")
@@ -418,61 +320,170 @@ def validate_product(product: Dict[str, Any]) -> bool:
     return True
 
 
-def save_products(products: List[Dict[str, Any]], db_path: str = DEFAULT_DB_PATH) -> int:
-    """
-    Validates and inserts products into SQLite database using parameterized queries.
-
-    Args:
-        products (List[Dict[str, Any]]): Extracted product data.
-        db_path (str): Target SQLite database filepath.
-
-    Returns:
-        int: Number of records successfully saved.
-    """
+def save_products(
+    products: List[Dict[str, Any]],
+    db_path: str = DEFAULT_DB_PATH,
+) -> Dict[str, int]:
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    valid_records = []
-
-    for item in products:
-        if validate_product(item):
-            valid_records.append(
-                (
-                    item.get("upc"),
-                    item["title"],
-                    item["price"],
-                    item.get("stock_count"),
-                    item["availability"],
-                    item.get("rating"),
-                    item.get("product_url"),
-                    timestamp,
-                )
-            )
-
-    if not valid_records:
-        logger.warning("No valid records found to insert.")
-        return 0
+    stats = {
+        "inserted": 0,
+        "updated": 0,
+        "price_changes": 0,
+    }
 
     with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON;")
         cursor = conn.cursor()
-        cursor.executemany(
-            """
-            INSERT INTO products (
-                upc,
-                title,
-                price,
-                stock_count,
-                availability,
-                rating,
-                product_url,
-                scraped_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-            """,
-            valid_records,
-        )
-        conn.commit()
-        inserted_count = cursor.rowcount
 
-    return inserted_count
+        for item in products:
+            if not validate_product(item):
+                continue
+
+            upc = item.get("upc")
+            title = item["title"]
+            price = float(item["price"])
+            stock_count = item.get("stock_count")
+            availability = item["availability"]
+            rating = item.get("rating")
+            product_url = item.get("product_url")
+
+            existing_record = None
+            if upc:
+                cursor.execute(
+                    "SELECT id, price FROM products WHERE upc = ?;",
+                    (upc,),
+                )
+                existing_record = cursor.fetchone()
+
+            if not existing_record and product_url:
+                cursor.execute(
+                    "SELECT id, price FROM products WHERE product_url = ?;",
+                    (product_url,),
+                )
+                existing_record = cursor.fetchone()
+
+            if not existing_record:
+                cursor.execute(
+                    "SELECT id, price FROM products WHERE title = ?;",
+                    (title,),
+                )
+                existing_record = cursor.fetchone()
+
+            if existing_record:
+                product_id, current_price = existing_record
+
+                if round(current_price, 2) != round(price, 2):
+                    price_diff = round(price - current_price, 2)
+                    percent_diff = round((price_diff / current_price) * 100, 2)
+
+                    cursor.execute(
+                        """
+                        INSERT INTO price_history (
+                            product_id,
+                            upc,
+                            old_price,
+                            new_price,
+                            price_change,
+                            percentage_change,
+                            recorded_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            product_id,
+                            upc,
+                            current_price,
+                            price,
+                            price_diff,
+                            percent_diff,
+                            timestamp,
+                        ),
+                    )
+                    stats["price_changes"] += 1
+                    logger.info(
+                        f"[PRICE ALERT] '{title}' changed: £{current_price:.2f} -> £{price:.2f} "
+                        f"({percent_diff:+.2f}%)"
+                    )
+
+                cursor.execute(
+                    """
+                    UPDATE products
+                    SET price = ?,
+                        stock_count = ?,
+                        availability = ?,
+                        rating = ?,
+                        product_url = ?,
+                        scraped_at = ?
+                    WHERE id = ?;
+                    """,
+                    (
+                        price,
+                        stock_count,
+                        availability,
+                        rating,
+                        product_url,
+                        timestamp,
+                        product_id,
+                    ),
+                )
+                stats["updated"] += 1
+
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO products (
+                        upc,
+                        title,
+                        price,
+                        stock_count,
+                        availability,
+                        rating,
+                        product_url,
+                        scraped_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        upc,
+                        title,
+                        price,
+                        stock_count,
+                        availability,
+                        rating,
+                        product_url,
+                        timestamp,
+                    ),
+                )
+                product_id = cursor.lastrowid
+                stats["inserted"] += 1
+
+                cursor.execute(
+                    """
+                    INSERT INTO price_history (
+                        product_id,
+                        upc,
+                        old_price,
+                        new_price,
+                        price_change,
+                        percentage_change,
+                        recorded_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        product_id,
+                        upc,
+                        None,
+                        price,
+                        0.0,
+                        0.0,
+                        timestamp,
+                    ),
+                )
+
+        conn.commit()
+
+    return stats
 
 
 def run_pipeline(
@@ -480,22 +491,9 @@ def run_pipeline(
     db_path: str = DEFAULT_DB_PATH,
     max_pages: Optional[int] = None,
     deep_scrape: bool = True,
-) -> int:
-    """
-    Executes the end-to-end scraper pipeline:
-    Crawling -> Deep Enrichment -> Cleaning -> Validation -> SQL Ingestion.
-
-    Args:
-        url (str): Source catalog URL.
-        db_path (str): Output SQLite database filepath.
-        max_pages (Optional[int]): Maximum pages to scrape.
-        deep_scrape (bool): Whether to fetch product detail pages.
-
-    Returns:
-        int: Count of successfully saved records.
-    """
+) -> Dict[str, int]:
     print("=" * 68)
-    print("  E-COMMERCE DATA EXTRACTION & INGESTION PIPELINE (v1.1)")
+    print("  E-COMMERCE DATA EXTRACTION & INGESTION PIPELINE (v2.0)")
     print("=" * 68)
     print(f"Target URL   : {url}")
     print(f"Database     : {db_path}")
@@ -510,13 +508,19 @@ def run_pipeline(
             max_pages=max_pages,
             enable_deep_scrape=deep_scrape,
         )
-        saved_count = save_products(raw_products, db_path)
+        stats = save_products(raw_products, db_path)
 
+        total_affected = stats["inserted"] + stats["updated"]
         print("-" * 68)
-        print(f"[SUMMARY] Total Extracted: {len(raw_products)} | Valid & Inserted: {saved_count}")
-        print(f"Successfully scraped and saved {saved_count} products.")
+        print(
+            f"[SUMMARY] Total Extracted: {len(raw_products)} | "
+            f"New: {stats['inserted']} | "
+            f"Updated: {stats['updated']} | "
+            f"Price Changes: {stats['price_changes']}"
+        )
+        print(f"Successfully processed and synced {total_affected} products.")
         print("=" * 68)
-        return saved_count
+        return stats
 
     except requests.RequestException as req_err:
         logger.error(f"Network error during execution: {req_err}")
@@ -530,7 +534,6 @@ def run_pipeline(
 
 
 def parse_args() -> argparse.Namespace:
-    """Configures command-line arguments for pipeline execution."""
     parser = argparse.ArgumentParser(
         description="E-Commerce Catalog Crawler and SQLite Ingestion Pipeline",
     )
